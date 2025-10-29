@@ -1,0 +1,580 @@
+---
+title: "Reproducibility Study: Data Wrangling"
+author: "Michael C. Saul, michael.saul [at] jax.org"
+format: 
+  html:
+    embed-resources: true
+    theme: cosmo
+    code-tools: true
+    code-fold: true
+    df-print: paged
+editor: visual
+---
+
+# Reproducibility Study: Basic Data Wrangling
+
+## Introduction
+
+### Summary of Study
+
+This is a study through the Digital *In Vivo* Alliance (DIVA) on three strains of mice tracked in home cages at three separate sites in three separate replicates. The general aim of this study is to see how within- and between-site variability governs reproducibility for digital biomarkers.
+
+#### Sites
+
+Each separate site will have its own level for the variable `site`. The sites were:
+
+-   BioMarin in Marin County, CA (`BioMarin` in the dataset, `org-7`)
+-   Novartis in San Diego, CA (`Novartis` in the dataset, `org-8`)
+-   AbbVie in Lake County, IL (`AbbVie` in the dataset, `org-5`)
+
+#### Replicates
+
+At each site, three separate replicates of each strain and sex were run at different times throughout the study. Each will have its own level in the `replicate` variable. These will be referred to as `R1`, `R2`, and `R3`. These replicates were completed in the following times:
+
+-   `R1`: 2024-01-08 to 2024-01-29 for `AbbVie`, 2024-01-09 to 2024-01-30 for `BioMarin` and `Novartis`.
+-   `R2`:2024-01-29 to 2024-02-19 for `AbbVie`, 2024-01-30 to 2024-02-20 for `BioMarin` and `Novartis`.
+-   `R3`: 2024-02-19 to 2022-03-11 for `AbbVie`, 2024-02-20 to 2024-03-13 for `BioMarin`, and 2024-02-20 to 2024-03-12 for `Novartis`.
+
+#### Mice
+
+At each site, three different mouse resources were used. Each will have its own level in the `mouse` variable. The following are the mice that were used in the study:
+
+-   [J:ARC (JAX #034608)](https://www.jax.org/strain/034608) (`J:ARC` in the study): an outbred stock derived from Swiss/ICR mice sourced from the ARC in Australia. Albino with white coat color.
+-   [C57BL/6J (JAX #000664)](https://www.jax.org/strain/000664) (`C57BL/6J` in the study): the most widely used inbred mouse strain. Black coat color.
+-   [A/J (JAX #000646)](https://www.jax.org/strain/000646) (`A/J` in the study): a widely used inbred strain selected because it [typically displays low locomotor activity in the open field relative to other strains](https://phenome.jax.org/measures/90001). Albino with white coat color.
+
+Additionally, both `Male` and `Female` mice (variable: `sex`) were used.
+
+## Analysis
+
+### Setup
+
+#### Libraries
+
+Bringing in essential R libraries.
+
+```{r libraries}
+# R code
+
+# Getting essential libraries
+library("tidyverse")
+library("janitor")
+library("here")
+library("ggokabeito")
+library("reticulate")
+```
+
+Bringing in essential Python libraries.
+
+```{python get_libraries}
+# Python code
+
+import s3fs as s3
+import pandas as pd
+import pyarrow
+import re
+```
+
+#### Study Info and Metadata
+
+Establishing a metadata object (note: this is a new format for multi-site and multi-strain work and will utilize an R list).
+
+```{r metadata}
+# R code
+
+repro_metadata = list(study_name = "Reproducibility: Three Site (early 2024)",
+                      sites = c(abbvie = "AbbVie",
+                                biomarin = "BioMarin",
+                                novartis = "Novartis"),
+                      tz = c(abbvie = "America/Chicago",
+                             biomarin = "America/Los_Angeles",
+                             novartis = "America/Los_Angeles"),
+                      lights_on = "04:00",
+                      lights_off = "18:00",
+                      species = "mouse",
+                      hardware = "DAX2",
+                      genotype = c(jarc = "J:ARC (JAX #034608)",
+                                   b6 = "C57BL/6J (JAX #000664)",
+                                   aj = "A/J (JAX #000646)"))
+```
+
+Getting a study information data frame.
+
+```{r make_study_info}
+# R code
+pipeline = "ag2024v0.10"
+study_info = data.frame(org = c(5L,5L,5L,7L,7L,7L,8L,8L,8L),
+                        study = c(131L,136L,137L,139L,140L,141L,142L,143L,144L),
+                        site = rep(c("AbbVie","BioMarin","Novartis"), each = 3),
+                        replicate = rep(1L:3, times = 3)) |>
+  dplyr::mutate(s3_base = paste0("s3://org-", org, "-uploads-prod/pipeline/study_", study, "/",
+                                 pipeline, "/stream/"))
+study_info_py = r_to_py(study_info)
+study_info
+```
+
+#### Variables
+
+```{r variables}
+# R code
+
+# Setting seed and selecting Okabe-Ito color order
+set.seed(20240510)
+okabe_order = c(5,3,6,1,8,7,2,4,9)
+
+# Setting import column types. 
+# NOTE: this is done so that time zones may be explicitly assigned.
+import_coltypes = "cccciccicdddd"
+```
+
+### Data Import
+
+#### One Hour Aggregation of Cage-Level Metrics
+
+Starting by bringing in one hour aggregation of cage-level metrics. Doing this separately for each organization, then putting them back together.
+
+
+#### Import from S3 Buckets
+
+Using the Python `s3fs` framework to import the datasets from their respective S3 buckets.
+
+```{python import_from_s3}
+# Python code
+
+urlbase = r.study_info_py['s3_base'].astype(str).tolist()
+
+fs = s3.S3FileSystem()
+
+cageurls = []
+
+for url in urlbase:
+  cages = fs.ls(url)
+  cageurls.extend(cages)
+
+dateurls = []
+
+for url in cageurls:
+  dates = fs.ls(f's3://{url}/')
+  dateurls.extend(dates)
+
+allhours = range(0,24)
+hourschr = ' '.join(f'{hour:02}.00' for hour in allhours)
+hours = hourschr.split(' ')
+hoururls = []
+
+for url in dateurls:
+  for hour in hours:
+    hoururls.extend([f's3://{url}/{hour}/'])
+    
+cageparquets = []
+individualparquets = []
+grouppattern = 'org.murine.aggregator-600-3600-86400.top.1H'
+individualpattern = 'org.murine.aggregator-600-3600-86400-id.top.1H'
+def safe_ls(path):
+    try:
+      return fs.ls(path)
+    except FileNotFoundError:
+        return []
+
+for hour in hoururls:
+  ls_hour = safe_ls(hour)
+  if len(ls_hour) != 0:
+    cagehour = list(filter(lambda x: re.search(r'org.murine.aggregator-600-3600-86400.top.1H', x), ls_hour))
+    cageparquets.extend(cagehour)
+    individualhour = list(filter(lambda x: re.search(r'org.murine.aggregator-600-3600-86400-id.top.1H', x), ls_hour))
+    individualparquets.extend(individualhour)
+```
+
+##### Cage Data
+
+Getting `DataFrames` for each hour and concatenating them. Starting with cage data.
+
+```{python getcageDataFrame}
+# Python code
+
+for cagehour in cageparquets:
+  cagehour_df = pd.read_parquet(f's3://{cagehour}/tsdb_mvp.parquet')
+  if cagehour == cageparquets[0]:
+    cagedf = cagehour_df
+  else:
+    cagedf = pd.merge(cagedf, cagehour_df, 'outer')
+```
+
+##### Individual Data
+
+```{python getcageDataFrame}
+# Python code
+
+for cagehour in individualparquets:
+  cagehour_df = pd.read_parquet(f's3://{cagehour}/tsdb_mvp.parquet')
+  if cagehour == individualparquets[0]:
+    individualdf = cagehour_df
+  else:
+    individualdf = pd.merge(individualdf, cagehour_df, 'outer')
+```
+
+
+#### Annotation Import
+
+Bringing in annotation data.
+
+```{r import_annotation}
+# R code
+
+repro_annotation = readr::read_csv("../data/repro_study_metadata.csv") |>
+  janitor::clean_names()
+colnames(repro_annotation)[1] = "study_id"
+```
+
+Joining annotation data to individual datasets.
+
+```{r join_annotation}
+# R code
+
+repro_cagedata = repro_annotation |>
+  dplyr::mutate(cage_id = as.character(cage_id),
+                study_id = as.character(study_id)) |>
+  dplyr::right_join(py$cagedf, by = c("study_id","cage_id")) |>
+  dplyr::filter(name == "cage.distance_travelled") |>
+  dplyr::arrange(site, replicate, cage_id, time)
+
+repro_individualdata = repro_annotation |>
+  dplyr::mutate(cage_id = as.character(cage_id),
+                study_id = as.character(study_id)) |>
+  dplyr::right_join(py$individualdf, by = c("study_id","cage_id")) |>
+  dplyr::filter(name == "animal.distance_travelled") |>
+  dplyr::arrange(site, replicate, cage_id, animal_id, time) |>
+  dplyr::filter(animal_id != 0)
+```
+
+Saving this dataset as a `RDS` file.
+
+```{r}
+# R code
+
+saveRDS(repro_cagedata, "../data/reproducibility_cage_data.RDS")
+saveRDS(repro_individualdata, "../data/reproducibility_individual_data.RDS")
+```
+
+#### AbbVie Import
+
+Importing data from `AbbVie`.
+
+```{r import_abbvie}
+# R code
+
+# Getting file paths for the three replicates.
+abbvie_r1_raw_file = "./data/cage_raw_1hr/Repro1-AB_cage_raw_hour_2024-05-10T17-18-20Z_export.csv"
+abbvie_r2_raw_file = "./data/cage_raw_1hr/Repro2-AB_cage_raw_hour_2024-05-10T17-22-26Z_export.csv"
+abbvie_r3_raw_file = "./data/cage_raw_1hr/Repro3-AB_cage_raw_hour_2024-05-10T17-29-50Z_export.csv"
+
+# Getting all three replicates.
+abbvie_r1_raw = read_csv(abbvie_r1_raw_file, 
+                         col_types = import_coltypes) |>
+  janitor::clean_names() |>
+  mutate(replicate = "R1")
+abbvie_r2_raw = read_csv(abbvie_r2_raw_file, 
+                         col_types = import_coltypes) |>
+  janitor::clean_names() |>
+  mutate(replicate = "R2")
+abbvie_r3_raw = read_csv(abbvie_r3_raw_file, 
+                         col_types = import_coltypes) |>
+  janitor::clean_names() |>
+  mutate(replicate = "R3")
+
+# Putting together the replicates.
+abbvie_raw = rbind(abbvie_r1_raw,
+                   abbvie_r2_raw,
+                   abbvie_r3_raw) |>
+  mutate(site = "AbbVie")
+
+# Glimpsing the raw data.
+dplyr::glimpse(abbvie_raw)
+```
+
+Changing the types of `start` variable.
+
+```{r abbvie_retyping_start}
+# R code
+
+abbvie_df = abbvie_raw |>
+  mutate(start = ymd_hms(start, tz = "UTC"),
+         utc_offset = ymd_hms(as.character(start), tz = "UTC") - ymd_hms(as.character(start), tz = repro_metadata$tz["abbvie"]))
+```
+
+Getting all the group name variables.
+
+```{r abbvie_get_group}
+# R code
+
+abbvie_df |>
+  group_by(group_name) |>
+  summarize(min_time = min(start),
+            max_time = max(start),
+            n = length(start))
+```
+
+The format for this is `"(replicate)-(sex)-(mouse)-(site)"`. Using regular expressions to extract the `mouse` and `sex` variables.
+
+```{r abbvie_extract_mouse_sex}
+# R code
+
+abbvie_df = abbvie_df |>
+  ungroup() |>
+  mutate(mouse = gsub("^\\d{1}-([MF])-([ABJ].*)-\\w+$", "\\2", group_name),
+         mouse = ifelse(mouse == "B6", "C57BL/6J", mouse),
+         sex = gsub("^\\d{1}-([MF])-([ABJ].*)-\\w+$", "\\1", group_name),
+         sex = ifelse(sex == "M", "Male", sex),
+         sex = ifelse(sex == "F", "Female", sex))
+
+abbvie_df |>
+  group_by(mouse, sex, replicate) |>
+  summarize(n = length(start))
+```
+
+These data are ready for further work.
+
+#### BioMarin Import
+
+Importing data from `BioMarin`.
+
+```{r import_biomarin}
+# R code
+
+# Getting file paths for the three replicates.
+biomarin_r1_raw_file = "./data/cage_raw_1hr/Repro1-BM_cage_raw_hour_2024-05-10T17-48-43Z_export.csv"
+biomarin_r2_raw_file = "./data/cage_raw_1hr/Repro2-BM_cage_raw_hour_2024-05-10T17-49-16Z_export.csv"
+biomarin_r3_raw_file = "./data/cage_raw_1hr/Repro3-BM_cage_raw_hour_2024-05-10T17-49-42Z_export.csv"
+
+# Getting all three replicates.
+biomarin_r1_raw = read_csv(biomarin_r1_raw_file, 
+                           col_types = import_coltypes) |>
+  janitor::clean_names() |>
+  mutate(replicate = "R1")
+biomarin_r2_raw = read_csv(biomarin_r2_raw_file, 
+                           col_types = import_coltypes) |>
+  janitor::clean_names() |>
+  mutate(replicate = "R2")
+biomarin_r3_raw = read_csv(biomarin_r3_raw_file, 
+                           col_types = import_coltypes) |>
+  janitor::clean_names() |>
+  mutate(replicate = "R3")
+
+# Putting together the replicates.
+biomarin_raw = rbind(biomarin_r1_raw,
+                     biomarin_r2_raw,
+                     biomarin_r3_raw) |>
+  mutate(site = "BioMarin")
+
+# Glimpsing the raw data.
+dplyr::glimpse(biomarin_raw)
+```
+
+Changing the types of `start` variable.
+
+```{r biomarin_retyping_start}
+# R code
+
+biomarin_df = biomarin_raw |>
+  mutate(start = ymd_hms(start, tz = "UTC"),
+         utc_offset = ymd_hms(as.character(start), tz = "UTC") - ymd_hms(as.character(start), tz = repro_metadata$tz["biomarin"]))
+```
+
+Getting all the group name variables.
+
+```{r biomarin_get_group}
+# R code
+
+biomarin_df |>
+  group_by(group_name) |>
+  summarize(min_time = min(start),
+            max_time = max(start),
+            n = length(start))
+```
+
+The format for this is `"(replicate)-(sex)-(mouse)-(site)"`. Using regular expressions to extract the `mouse` and `sex` variables.
+
+```{r biomarin_extract_mouse_sex}
+# R code
+
+biomarin_df = biomarin_df |>
+  ungroup() |>
+  mutate(mouse = gsub("^\\d{1}-([MF])-([ABJ].*)-\\w+$", "\\2", group_name),
+         mouse = ifelse(mouse == "B6", "C57BL/6J", mouse),
+         sex = gsub("^\\d{1}-([MF])-([ABJ].*)-\\w+$", "\\1", group_name),
+         sex = ifelse(sex == "M", "Male", sex),
+         sex = ifelse(sex == "F", "Female", sex))
+
+biomarin_df |>
+  group_by(mouse, sex, replicate) |>
+  summarize(n = length(start))
+```
+
+#### Novartis Import
+
+Importing data from `Novartis`.
+
+```{r import_novartis}
+# R code
+
+# Getting file paths for the three replicates.
+novartis_r1_raw_file = "./data/cage_raw_1hr/Repro1-NV_cage_raw_hour_2024-05-10T17-54-06Z_export.csv"
+novartis_r2_raw_file = "./data/cage_raw_1hr/Repro2-NV_cage_raw_hour_2024-05-10T17-54-29Z_export.csv"
+novartis_r3_raw_file = "./data/cage_raw_1hr/Repro3-NV_cage_raw_hour_2024-05-10T17-57-37Z_export.csv"
+
+# Getting all three replicates.
+novartis_r1_raw = read_csv(novartis_r1_raw_file, 
+                           col_types = import_coltypes) |>
+  janitor::clean_names() |>
+  mutate(replicate = "R1")
+novartis_r2_raw = read_csv(novartis_r2_raw_file, 
+                           col_types = import_coltypes) |>
+  janitor::clean_names() |>
+  mutate(replicate = "R2")
+novartis_r3_raw = read_csv(novartis_r3_raw_file, 
+                           col_types = import_coltypes) |>
+  janitor::clean_names() |>
+  mutate(replicate = "R3")
+
+# Putting together the replicates.
+novartis_raw = rbind(novartis_r1_raw,
+                     novartis_r2_raw,
+                     novartis_r3_raw) |>
+  mutate(site = "Novartis")
+
+# Glimpsing the raw data.
+dplyr::glimpse(novartis_raw)
+```
+
+Changing the types of `start` variable.
+
+```{r novartis_retyping_start}
+# R code
+
+novartis_df = novartis_raw |>
+  mutate(start = ymd_hms(start, tz = "UTC"),
+         utc_offset = ymd_hms(as.character(start), tz = "UTC") - ymd_hms(as.character(start), tz = repro_metadata$tz["novartis"]))
+```
+
+Getting all the group name variables.
+
+```{r novartis_get_group}
+# R code
+
+novartis_df |>
+  group_by(group_name) |>
+  summarize(min_time = min(start),
+            max_time = max(start),
+            n = length(start))
+```
+
+The format for this is `"(replicate)-(sex)-(mouse)-(site)"`. Using regular expressions to extract the `mouse` and `sex` variables.
+
+```{r novartis_extract_mouse_sex}
+# R code
+
+novartis_df = novartis_df |>
+  ungroup() |>
+  mutate(mouse = gsub("^\\d{1}-([MF])-([ABJ].*)-\\w+$", "\\2", group_name),
+         mouse = ifelse(mouse == "B6", "C57BL/6J", mouse),
+         sex = gsub("^\\d{1}-([MF])-([ABJ].*)-\\w+$", "\\1", group_name),
+         sex = ifelse(sex == "M", "Male", sex),
+         sex = ifelse(sex == "F", "Female", sex))
+
+novartis_df |>
+  group_by(mouse, sex, replicate) |>
+  summarize(n = length(start))
+```
+
+#### Dataset Consolidation
+
+Consolidating the activity data into one large data frame.
+
+```{r dataset_consolidation}
+# R code
+
+repro_activity_1hr_df = rbind(abbvie_df,
+                              biomarin_df,
+                              novartis_df)
+```
+
+Cleaning up the raw datasets.
+
+```{r raw_data_cleanup}
+# R code 
+
+rm(list = ls(pattern = "_raw"))
+```
+
+### Annotation
+
+Getting annotation data for all studies.
+
+```{r get_annotation}
+# R code
+
+annotation_raw = list.files(path = "./data/annotations/")
+annot_coltypes = "cccccccccccccc"
+for (i in annotation_raw) {
+  rep_i = gsub("^repro([123])-([abn][bvm])_annotations_\\d{4}-\\d{2}-\\d{2}t\\d+z\\.csv$", "\\1", i)
+  site_i = gsub("^repro([123])-([abn][bvm])_annotations_\\d{4}-\\d{2}-\\d{2}t\\d+z\\.csv$", "\\2", i)
+  site_i = switch(site_i, ab = "AbbVie", bm = "BioMarin", nv = "Novartis")
+  annot_i = read_csv(paste0("./data/annotations/",i),
+                     col_types = annot_coltypes) |>
+    janitor::clean_names() |>
+    mutate(replicate = paste0("R",rep_i),
+           site = site_i,
+           created = ymd_hms(created, tz = "UTC"),
+           pin_start = ymd_hms(paste(pin_start_date_local, pin_start_time_local), 
+                               tz = repro_metadata$tz[str_to_lower(site_i)]),
+           pin_start = with_tz(pin_start, tzone = "UTC"))
+  if (i == annotation_raw[1]) {
+    repro_annotation_df = annot_i
+  } else {
+    repro_annotation_df = rbind(repro_annotation_df,
+                                annot_i)
+  }
+}
+
+rm(list = c(ls(pattern = "i$"), 
+            ls(pattern = "raw"), 
+            ls(pattern = "coltypes$")))
+
+repro_annotation_df = repro_annotation_df |>
+  ungroup() |>
+  mutate(mouse = gsub("^\\d{1}-([MF])-([ABJ].*)-\\w+$", "\\2", group_name),
+         mouse = ifelse(mouse == "B6", "C57BL/6J", mouse),
+         sex = gsub("^\\d{1}-([MF])-([ABJ].*)-\\w+$", "\\1", group_name),
+         sex = ifelse(sex == "M", "Male", sex),
+         sex = ifelse(sex == "F", "Female", sex))
+
+dplyr::glimpse(repro_annotation_df)
+```
+
+## Save Data
+
+#### Save `.RDS` Files
+
+For R, the `.RDS` format is typically used as a way of preserving types. Doing this for the important datasets.
+
+```{r save_rds}
+# R code
+
+repro_today = today()
+saveRDS(repro_activity_1hr_df, paste0("./data/rds/repro_activity_1hr_cage_",
+                                      repro_today,".RDS"))
+saveRDS(repro_metadata, paste0("./data/rds/repro_metadata_",
+                               repro_today,".RDS"))
+saveRDS(repro_annotation_df, paste0("./data/rds/repro_annotation_",
+                                    repro_today,".RDS"))
+```
+
+## Reproducibility Information
+
+Reporting out R session information.
+
+```{r r_sessioninfo}
+# R code
+
+sessionInfo()
+```

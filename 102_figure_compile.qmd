@@ -1,0 +1,642 @@
+---
+title: "Reproducibility Study: Initial Analysis"
+author: "Michael C. Saul, michael.saul [at] jax.org"
+format: 
+  html:
+    embed-resources: true
+    theme: cosmo
+    code-tools: true
+    code-fold: true
+    df-print: paged
+editor: visual
+---
+
+# Reproducibility Study: Figure Compilation
+
+## Introduction
+
+### Motivation
+
+This document compiles figures early 2024 DIVA Reproducibility Study. The data were wrangled in the script labelled [100_data_wrangling.html](./100_data_wrangling.html) and analyzed in the script labelled [101_initial_analysis.html](./101_initial_analysis.html).
+
+## Analysis
+
+### Setup
+
+#### Libraries
+
+Getting R libraries.
+
+```{r libraries}
+# R code
+
+# Getting essential libraries
+library("tidyverse")
+library("janitor")
+library("here")
+library("ggokabeito")
+library("zoo")
+library("nlme")
+library("ggpattern")
+library("cowplot")
+library("Cairo")
+library("ggtext")
+library("ggnewscale")
+library("ggrepel")
+library("viridis")
+```
+
+#### Variables
+
+```{r variables}
+# R code
+
+pt_to_mm = 0.3527777778
+mm_to_pt = 1 / pt_to_mm
+
+envision_colors = c("#23356E","#2D6FB7","#692F90","#9F1D80","#D62770")
+library("RColorBrewer")
+envision_24_colors = colorRampPalette(envision_colors)(24)
+```
+
+#### `ggplot2` Themes
+
+```{r ggplot2_themes}
+# R code
+
+pubtheme_classic = theme_classic() +
+  theme(axis.title = element_text(size = 8,
+                                  color = "#000000"), # text size is in points
+        axis.text = element_text(size = 8,
+                                 color = "#000000"), # text size is in points
+        axis.ticks = element_line(color = "#000000",
+                                  linewidth = (0.5 * pt_to_mm), # line size is in mm
+                                  lineend = "round"),
+        axis.line = element_line(color = "#000000",
+                                 linewidth = (0.5 * pt_to_mm), # line size in mm
+                                 lineend = "round"),
+        legend.text = element_text(size = 6, # text size is in points
+                                   color = "#000000"),
+        legend.title = element_text(size = 8, # text size is in points
+                                    color = "#000000"),
+        panel.grid = element_line(color = "#FFFFFF"),
+        strip.text = element_text(size = 8, color = "#000000")) # text size is in points
+
+pubtheme_bw = theme_bw() +
+  theme(axis.title = element_text(size = 8, # text size in points
+                                  color = "#000000",
+                                  family = "Helvetica"), # text size in points
+        axis.text = element_text(size = 8, # text size in points
+                                 color = "#000000",
+                                 family = "Helvetica"), # text size in points
+        axis.ticks = element_line(color = "#000000",
+                                  linewidth = (0.5 * pt_to_mm), # line size in mm
+                                  lineend = "round"),
+        axis.line = element_line(color = "#000000",
+                                 linewidth = (0.5 * pt_to_mm), # line size in mm
+                                 lineend = "round"),
+        legend.text = element_text(size = 6, # text size in points
+                                   color = "#000000",
+                                   family = "Helvetica"),
+        legend.title = element_text(size = 8, # text size in points
+                                    color = "#000000",
+                                    family = "Helvetica"),
+        panel.grid = element_line(color = "#FFFFFF"),
+        strip.text = element_text(size = 8, color = "#000000", family = "Helvetica"))
+
+pubtheme_cowplot = cowplot::theme_cowplot() +
+  theme(axis.title = element_text(size = 8, # text size in points
+                                  color = "#000000"), # text size in points
+        axis.text = element_text(size = 6, # text size in points
+                                 color = "#000000"), # text size in points
+        axis.ticks = element_line(color = "#000000",
+                                  linewidth = (0.25 * pt_to_mm), # line size in mm
+                                  lineend = "round"),
+        axis.line = element_line(color = "#000000",
+                                 linewidth = (0.5 * pt_to_mm), # line size in mm
+                                 lineend = "round"),
+        legend.text = element_text(size = 6, # text size in points
+                                   color = "#000000"),
+        legend.title = element_text(size = 8, # text size in points
+                                    color = "#000000"),
+        panel.grid = element_line(color = "#FFFFFF"),
+        strip.text = element_text(size = 8, color = "#000000"))
+```
+
+#### Data
+
+```{r load_data}
+# R code
+
+load("reproducibility_3site_analysis_data.RData")
+```
+
+#### Figure 1 Panels
+
+Meters per day plot
+
+```{r meters_day_plot}
+# R code
+
+meters_day_plot <- ggplot(data = activity_24h_mean, 
+                          aes(x = strain, y = meters_day, color = strain)) + 
+  geom_boxplot(outlier.color = NA) + 
+  ggbeeswarm::geom_beeswarm(cex = 3, size = 0.5, priority = "random",
+                            method = "hex") + 
+  pubtheme_bw +
+  theme(legend.position = "none",
+        panel.grid = element_line(color = "#FFFFFF")) +
+  scale_color_okabe_ito(name = "Genotype", order = okabe_order[c(4:9,1:3)]) +
+  xlab("Genotype") +
+  ylab("Daily Activity (m/day)")
+
+meters_day_plot
+```
+
+Rolling Mean Plot
+
+```{r rollmean_plot}
+# R code
+
+rollmean_plot <- repro_activity_1hr_rollmean_df |>
+  dplyr::mutate(strain_sex = ifelse(sex == "Female", "F", "M"),
+                strain_sex = paste0(strain, " ", strain_sex),
+                strain_sex = factor(strain_sex,
+                                    levels = c("A/J F", "A/J M",
+                                               "C57BL/6J F", "C57BL/6J M",
+                                               "J:ARC F", "J:ARC M"),
+                                    ordered = TRUE)) |>
+  ggplot(aes(x = experiment_time_h,
+             y = tsd_trend,
+             color = site,
+             group = site_rep_mouse_sex_cagename)) +
+  geom_line(size = 0.25) +
+  facet_grid(replicate ~ strain_sex) +
+  pubtheme_bw +
+  scale_x_continuous(breaks = c(0,240,480)) +
+  theme(legend.position = "bottom",
+        panel.grid = element_line(color = "#FFFFFF")) +
+  scale_color_okabe_ito(name = "Site", order = okabe_order) +
+  xlab("Experiment Time (hours)") +
+  ylab("Rolling Mean Activity (cm/s)")
+
+rollmean_plot
+```
+
+Meters per day ANOVA
+
+```{r mpd_anova}
+# R code
+
+meters_per_day_aov = meters_per_day_aov |>
+  dplyr::mutate(factor = as.character(factor),
+                factor = gsub("Replicate","Ship",factor),
+                factor = gsub("Genetics","Genotype",factor),
+                factor = factor(factor, levels = factor, ordered = TRUE))
+
+meters_day_pve_plot <- ggplot(data = meters_per_day_aov,
+                              aes(x = study, y = pve, fill = factor)) +
+  geom_col(stat = "identity", color = "#444455", size = 0.25) + 
+  scale_fill_manual(name = "Factor", values = okabe_order_factors) +
+  pubtheme_bw +
+  xlab(NULL) +
+  ylab("% Variance Explained") +
+  theme(legend.position = "right",
+        panel.grid = element_line(color = "#FFFFFF")) +
+  coord_cartesian(expand = FALSE)
+
+meters_day_pve_plot
+```
+
+24-hour percent variance explained
+
+```{r pve_24hr}
+# R code
+
+pve_24hr_plot <- df_pve |>
+  dplyr::mutate(factor = as.character(factor),
+                factor = gsub("Replicate","Ship",factor),
+                factor = gsub("Genetics","Genotype",factor),
+                factor = gsub("^Ship:Genotype$","Genotype:Ship",factor),
+                factor = gsub("^Site:Genotype$","Genotype:Site",factor),
+                factor = factor(factor, levels = levels(meters_per_day_aov$factor), ordered = TRUE)) |>
+  ggplot(aes(x = as.numeric(start_time_local), 
+             y = percent_variance_explained,
+             fill = factor)) +
+  geom_bar(position="stack", stat="identity", color = "#444455", width = 1, size = 0.25) +
+  scale_x_continuous(breaks = seq(from = 1, to = 24, by = 4), labels = c("04:00","08:00","12:00","16:00","20:00","00:00")) +
+  pubtheme_bw +
+  scale_fill_manual(name = "Factor", values = okabe_order_factors) +
+  xlab("Time of Day") +
+  ylab("% Variance Explained") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+        panel.grid = element_line(color = "#FFFFFF"),
+        legend.position = "bottom") +
+  coord_cartesian(expand = FALSE)
+
+pve_24hr_plot
+```
+
+Strain-by-sex 24 hour plot
+
+```{r strain_sex_24h}
+# R code
+
+strainsex_average_plot = ggplot(data = repro_activity_1hr_hourly_summary, aes(x = as.numeric(start_time_local),
+                                                                              y = mean,
+                                                                              color = strain)) +
+  geom_rect(xmin = 15, xmax = 25, ymin = -Inf, ymax = Inf, 
+            alpha = 1, fill = "#DDDDDD", color = NA) +
+  geom_ribbon(aes(ymin = ll, ymax = ul, fill = strain),
+              alpha = 0.5, color = NA) +
+  geom_line() +
+  facet_wrap(sex ~ ., nrow = 2) +
+  pubtheme_bw +
+  scale_x_continuous(breaks = seq(from = 1, to = 24, by = 4), labels = c("04:00","08:00","12:00","16:00","20:00","00:00"), expand = c(0,0)) +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+        panel.grid = element_line(color = "#FFFFFF")) +
+  xlab("Time of Day") +
+  ylab("Mean Activity (cm/s)") +
+  scale_color_okabe_ito(name = "Genotype", order = okabe_order[c(4:9,1:3)]) +
+  scale_fill_okabe_ito(name = "Genotype", order = okabe_order[c(4:9,1:3)])
+
+strainsex_average_plot
+```
+
+Hourly PVE plot
+
+```{r hourly_pve_plot}
+# R code
+
+pve_hourly_plot <- df_pve |>
+  dplyr::mutate(factor = as.character(factor),
+                factor = gsub("Genetics","Genotype",factor),
+                factor = gsub("Replicate","Ship",factor),
+                factor = gsub("^Ship:Genotype$","Genotype:Ship",factor),
+                factor = gsub("^Site:Genotype$","Genotype:Site",factor),
+                factor = factor(factor, levels = levels(meters_per_day_aov$factor), ordered = TRUE)) |>
+  ggplot(aes(x = as.numeric(start_time_local), 
+             y = percent_variance_explained, 
+             fill = factor)) +
+  geom_bar(position="stack", stat="identity", color = "#444455", width = 1) +
+  scale_x_continuous(breaks = seq(from = 1, to = 24, by = 4), labels = c("04:00","08:00","12:00","16:00","20:00","00:00")) +
+  pubtheme_bw +
+  scale_fill_manual(name = "Factor", values = okabe_order_factors) +
+  xlab("Time of Day") +
+  ylab("% Variance Explained") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+        panel.grid = element_line(color = "#FFFFFF"),
+        legend.position = "bottom")
+
+pve_hourly_plot
+```
+
+Coefficient of Variation Plot
+
+```{r cov_plot}
+# R code
+
+repro_activity_1hr_rollmean_cv = repro_activity_1hr_rollmean_df |> 
+  dplyr::group_by(study_id, study_name, site, time_zone, replicate, cage_id, cage_name, strain, sex) |> 
+  dplyr::summarize(mean_rollmean = mean(tsd_trend, na.rm = TRUE), 
+                   sd_rollmean = sd(tsd_trend, na.rm = TRUE)) |> 
+  dplyr::ungroup() |> 
+  dplyr::mutate(cov_rollmean = sd_rollmean / mean_rollmean)
+
+cov_rollmean_plot <- ggplot(data = repro_activity_1hr_rollmean_cv, 
+                            aes(x = strain, y = cov_rollmean, color = strain)) + 
+  geom_boxplot(na.rm = TRUE) + 
+  ggbeeswarm::geom_beeswarm(cex = 3, size = 0.5, priority = "random",
+                            method = "hex") + 
+  pubtheme_bw + 
+  theme(legend.position = "none",
+        panel.grid = element_line(color = "#FFFFFF")) + 
+  scale_color_okabe_ito(name = "Genotype", order = okabe_order[c(4:9,1:3)]) + 
+  xlab("Genotype") +
+  ylab("CoV of Rolling Mean")
+
+cov_rollmean_plot
+```
+
+Detrended CoV Table
+
+```{r detrended_cov_table}
+# R code
+
+cov_detrended = repro_activity_1hr_rollmean_df |>
+  ungroup() |>
+  group_by(site, replicate, cage_name, sex, strain, study_name) |>
+  summarize(mean_detrended = mean(tsd_detrended, na.rm = TRUE),
+            sd_detrended = sd(tsd_detrended, na.rm = TRUE)) |>
+  dplyr::mutate(cov_detrended = sd_detrended / mean_detrended)
+
+as.data.frame(anova(lm(cov_detrended ~ strain + sex + site + replicate + strain:sex + strain:site + strain:replicate,
+                       data = cov_detrended))) |>
+  dplyr::mutate(pve = 100 * (`Sum Sq` / sum(`Sum Sq`)))
+```
+
+Detrended CoV Plot
+
+```{r detrended_cov_plot}
+# R code
+
+cov_plot = cov_detrended |>
+  dplyr::mutate(replicate = gsub("Replicate", "Ship Date", replicate)) |>
+  ggplot(aes(x = replicate, y = cov_detrended)) +
+  geom_boxplot(aes(color = replicate), 
+               outlier.colour = NA) +
+  scale_color_manual(values = c("#AAAAAA","#777777","#444444")) +
+  ggnewscale::new_scale_color() +
+  ggbeeswarm::geom_beeswarm(aes(color = strain), cex = 3, priority = "random",
+                            method = "hex", size = 0.5) +
+  scale_color_okabe_ito(name = "Genotype", order = okabe_order[c(4:9,1:3)]) +
+  xlab(NULL) +
+  ylab("CoV of Detrended Data") +
+  pubtheme_bw +
+  theme(legend.position = "none")
+
+cov_plot
+```
+
+Figure 1 compile
+
+```{r figure1_compile}
+# R code
+
+fig1_row1 = plot_grid(rollmean_plot + theme(legend.position = "none", panel.margin = unit(0, "mm")), 
+                      labels = c('A'),
+                      label_size = 12, label_fontfamily = "Helvetica", label_fontface = "bold")
+fig1_row2 = plot_grid(cov_plot,
+                      meters_day_plot + theme(legend.position = "none") + xlab(NULL), 
+                      meters_day_pve_plot + theme(legend.key.height = unit(4,"mm")), 
+                      labels = c('B', 'C', 'D'), rel_widths = c(1.125,1.125,1), nrow = 1,
+                      label_size = 12, label_fontfamily = "Helvetica", label_fontface = "bold")
+fig1_row3 = plot_grid(strainsex_average_plot + theme(legend.position = "none"), 
+                      pve_24hr_plot + theme(legend.position = "none"), 
+                      labels = c('E', 'F'), rel_widths = c(1, 1),
+                      label_size = 12, label_fontfamily = "Helvetica", label_fontface = "bold")
+
+fig1_rows123 = plot_grid(fig1_row1, 
+                         fig1_row2, 
+                         fig1_row3, 
+                         ncol = 1, 
+                         rel_heights = c(3,2.25,3))
+
+ggsave("./output/figure1_draft.pdf", fig1_rows123, width = 180, height = 185, units = "mm")
+
+fig1_rows123
+```
+
+#### Figure 2 Panels
+
+PVE Simulations Plot
+
+```{r pve_sims}
+# R code
+
+pve_sims = df_pve_rand_summary |>
+  dplyr::filter(sample_size %in% c(1,3,10,20)) |>
+  dplyr::mutate(sample_size = paste(sample_size, "Days"),
+                sample_size = gsub("^1 Days$", "1 Day", sample_size),
+                sample_size = factor(paste("Duration:", sample_size),
+                                     levels = paste("Duration:", c(1,3,10,20), 
+                                                    c("Day","Days","Days","Days")),
+                                     ordered = TRUE),
+                factor = str_to_title(factor),
+                factor = gsub("sex", "Sex", factor),
+                factor = gsub("[Ss]train", "Genotype", factor),
+                factor = factor(factor,
+                                levels = c("Residuals","Genotype","Sex",
+                                           "Genotype:Sex","Site","Replicate",
+                                           "Site:Genotype","Replicate:Genotype"),
+                                ordered = TRUE)) |>
+  dplyr::mutate(factor = as.character(factor),
+                factor = gsub("Replicate","Ship",factor),
+                factor = gsub("^Ship:Genotype$","Genotype:Ship",factor),
+                factor = gsub("^Site:Genotype$","Genotype:Site",factor),
+                factor = factor(factor, levels = levels(meters_per_day_aov$factor), ordered = TRUE)) |>
+  ggplot(aes(x = as.numeric(start_time_local), 
+             y = rescaled_median_pve, 
+             fill = factor)) +
+  geom_bar(position="stack", stat="identity", color = "#444455", width = 1, size = 0.25) +
+  scale_x_continuous(breaks = seq(from = 1, to = 24, by = 4), labels = c("04:00","08:00","12:00","16:00","20:00","00:00"), expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  facet_wrap(. ~ sample_size, ncol = 2) +
+  pubtheme_bw +
+  scale_fill_manual(name = NULL, values = okabe_order_factors) +
+  xlab("Time of Day") +
+  ylab("Median % Variance Explained (Rescaled)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+        panel.grid = element_line(color = "#FFFFFF"),
+        legend.position = "bottom")
+
+pve_sims
+```
+
+PVE Reproducibility
+
+```{r reproducibility}
+# R code
+
+pve_repro = df_pve_strain_reprod_summary |>
+  dplyr::mutate(n_sig = paste(n_sig, "sig.")) |>
+  ggplot(aes(x = sample_size, y = percent, fill = n_sig)) +
+  geom_bar(position="stack", stat="identity", color = "#444455", width = 1, size = 0.25) +
+  pubtheme_bw +
+  scale_x_continuous(breaks = c(5,10,15,20), expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_fill_manual(name = NULL, values = c("#FFFFFF","#BBBBBB","#777777","#222222")) +
+  theme(legend.position = "bottom",
+        panel.grid = element_line(color = "#FFFFFF")) +
+  ylab("% Tests") +
+  xlab("Duration (days)")
+
+pve_repro
+```
+
+Hourly Reproducibility Plot
+
+```{r reprod_hourly_plot}
+# R code
+
+reprod_hour_plot = df_pve_strain_reprod_20days |>
+  dplyr::mutate(n_sig = paste(n_sig, "sig.")) |>
+  ggplot(aes(x = as.numeric(start_time_local), y = percent, fill = n_sig)) +
+  geom_bar(position="stack", stat="identity", color = "#444455", width = 1, size = 0.25) +
+  pubtheme_bw +
+  scale_x_continuous(breaks = seq(from = 1, to = 24, by = 4), labels = c("04:00","08:00","12:00","16:00","20:00","00:00"), expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_fill_manual(name = NULL, values = c("#FFFFFF","#BBBBBB","#777777","#222222")) +
+  theme(legend.position = "bottom",
+        panel.grid = element_line(color = "#FFFFFF")) +
+  ylab("% Tests") +
+  xlab("Time of Day")
+
+reprod_hour_plot
+```
+
+PVE Duration and Sample Size Plot
+
+```{r pve_duration_sample_size_plot}
+# R code
+
+strain_pve_summary = df_pve_rand_summary |> 
+  filter(factor == "strain") |> 
+  dplyr::mutate(cohens_d_equiv = median_pve / (100 - median_pve))
+
+strain_pve_summary$n_power = -100
+within_var = 1000
+power_cubert = 0.8 ^ (1/3)
+
+for (i in seq_len(nrow(strain_pve_summary))) {
+  r2_i = dplyr::pull(strain_pve_summary,"rescaled_median_pve")[i] / 100
+  total_var_i = within_var / (1 - r2_i)
+  between_var_i = r2_i * total_var_i
+  anova_n_i = power.anova.test(groups = 3,
+                               between.var = between_var_i,
+                               within.var = within_var,
+                               power = power_cubert, 
+                               sig.level = 0.05)
+  strain_pve_summary[i,"n_power"] = ceiling(anova_n_i$n)
+}
+
+strain_pve_summary$label_n = ifelse(strain_pve_summary$sample_size %in% c(1,20),
+                                    paste0('n = ', strain_pve_summary$n_power),
+                                    NA)
+
+sample_size_range = range(strain_pve_summary$n_power)
+rescaled_pve_range = range(strain_pve_summary$rescaled_median_pve)
+scale_factor = (sample_size_range[2]) / (rescaled_pve_range[2] - rescaled_pve_range[1])
+
+pve_sample_size_plot = strain_pve_summary |>
+  dplyr::mutate(has_label = ifelse(is.na(label_n),
+                                   NA, "1")) |>
+  ggplot(aes(x = sample_size, 
+             y = rescaled_median_pve, 
+             color = start_time_local)) + 
+  geom_point(size = 0.5, shape = 3) +
+  geom_step(aes(y = (n_power + 7) / scale_factor), direction = "hv") +
+  # geom_label_repel(aes(y = (n_power + 7) / scale_factor, label = label_n), size = 6 * pt_to_mm) +
+  # geom_point(aes(y = (n_power + 7) / scale_factor, shape = has_label), size = 0.75) +
+  pubtheme_bw +
+  scale_y_continuous(
+    name = "% Variance Explained", limits = rescaled_pve_range,
+    sec.axis = sec_axis(~ (. * scale_factor) - 7, name = "Replicable Sample Size (n)")
+  ) +
+  xlab("Study Duration (days)") +
+  scale_color_manual(values = envision_24_colors) +
+  ylab("% Variance Explained") +
+  facet_wrap(. ~ start_time_local, nrow = 4) + 
+  theme(panel.grid = element_line(color = "#FFFFFF"), 
+        legend.position = "none",
+        panel.margin = unit(1, "mm"))
+
+pve_sample_size_plot
+```
+
+Collapsed PVE Plot
+
+```{r collapsed_pve_plot}
+# R code
+
+pve_summary_collapsed = df_pve_rand |> 
+  dplyr::group_by(factor, sample_size) |>
+  dplyr::summarize(median_pve = median(percent_variance_explained, na.rm = TRUE)) |>
+  dplyr::ungroup() |>
+  dplyr::group_by(sample_size) |>
+  dplyr::mutate(rescaled_median_pve = 100 * median_pve / sum(median_pve))
+  
+  
+strain_pve_summary_collapsed = pve_summary_collapsed |>
+  dplyr::filter(factor == "strain") |> 
+  dplyr::mutate(cohens_d_equiv = rescaled_median_pve / (100 - rescaled_median_pve))
+
+strain_pve_summary_collapsed$n_power = -100
+within_var = 1000
+power_cubert = 0.8 ^ (1/3)
+
+for (i in seq_len(nrow(strain_pve_summary_collapsed))) {
+  r2_i = dplyr::pull(strain_pve_summary_collapsed,"rescaled_median_pve")[i] / 100
+  total_var_i = within_var / (1 - r2_i)
+  between_var_i = r2_i * total_var_i
+  anova_n_i = power.anova.test(groups = 3,
+                               between.var = between_var_i,
+                               within.var = within_var,
+                               power = power_cubert, 
+                               sig.level = 0.05)
+  strain_pve_summary_collapsed[i,"n_power"] = ceiling(anova_n_i$n)
+}
+
+strain_pve_summary_collapsed$label_n = ifelse(strain_pve_summary_collapsed$sample_size %in% c(1,20),
+                                              paste0('n = ', strain_pve_summary_collapsed$n_power),
+                                              NA)
+
+sample_size_range = range(strain_pve_summary_collapsed$n_power)
+rescaled_pve_range = range(strain_pve_summary_collapsed$rescaled_median_pve)
+scale_factor = (sample_size_range[2]) / (rescaled_pve_range[2] - rescaled_pve_range[1])
+offset = rescaled_pve_range[1] * scale_factor 
+
+pve_sample_size_plot_collapsed = strain_pve_summary_collapsed |>
+  dplyr::mutate(has_label = ifelse(is.na(label_n),
+                                   NA, "1")) |>
+  ggplot(aes(x = sample_size, 
+             y = rescaled_median_pve)) + 
+  geom_step(aes(y = (n_power + offset) / scale_factor - 5), direction = "hv", color = "#008FC0", size = 1) +
+  geom_point(size = 3, shape = 3, color = "#ED8B00", stroke = 1) +
+  # geom_label_repel(aes(y = (n_power + 7) / scale_factor, label = label_n), size = 6 * pt_to_mm) +
+  # geom_point(aes(y = (n_power + 7) / scale_factor, shape = has_label), size = 0.75) +
+  pubtheme_bw +
+  scale_y_continuous(
+    name = "Variance Explained (orange + signs)", limits = rescaled_pve_range,
+    sec.axis = sec_axis(~ (. * scale_factor) - offset + 5, name = "Replicable Sample Size (blue stair step)")
+  ) +
+  xlab("Study Duration (days)") +
+  theme(panel.grid = element_line(color = "#FFFFFF"), 
+        legend.position = "none",
+        panel.margin = unit(1, "mm"))
+
+pve_sample_size_plot_collapsed
+```
+
+Compile Figure 2
+
+```{r figure_2_compile}
+# R code
+
+fig2_col1 = plot_grid(pve_sims + theme(legend.position = "bottom", 
+                                       panel.margin = unit(1, "mm"),
+                                       legend.key.height = unit(3,"mm"),
+                                       legend.key.width = unit(3,"mm"),
+                                       legend.margin = margin(t = -5)), 
+                      labels = c('A','B'),
+                      label_size = 12, label_fontfamily = "Helvetica", label_fontface = "bold",
+                      rel_widths = c(2,1), ncol = 1)
+fig2_col2 = plot_grid(pve_repro + theme(legend.position = "none"),
+                      reprod_hour_plot + theme(legend.position = "bottom", 
+                                               legend.key.height = unit(3,"mm"),
+                                               legend.key.width = unit(3,"mm"),
+                                               legend.margin = margin(t = -5)),
+                      labels = c('B','C'),
+                      label_size = 12, label_fontfamily = "Helvetica", label_fontface = "bold",
+                      rel_heights = c(1,1.1), ncol = 1)
+fig2_row2 = plot_grid(pve_sample_size_plot,
+                      ncol = 1, labels = c('D'),
+                      label_size = 12, label_fontfamily = "Helvetica", label_fontface = "bold")
+fig2_cols12 = plot_grid(fig2_col1, fig2_col2, nrow = 1, rel_widths = c(1.5,1))
+fig2_rows12 = plot_grid(fig2_cols12, fig2_row2, nrow = 2, rel_heights = c(1,1))
+
+ggsave("./output/figure2_draft.pdf", fig2_rows12, width = 180, height = 185, units = "mm")
+
+fig2_rows12
+```
+
+## Reproducibility Information
+
+Reporting out R session information.
+
+```{r r_sessioninfo}
+# R code
+
+sessionInfo()
+```

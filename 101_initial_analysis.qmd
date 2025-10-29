@@ -1,0 +1,994 @@
+---
+title: "Reproducibility Study: Initial Analysis"
+author: "Michael C. Saul, michael.saul [at] jax.org"
+format: 
+  html:
+    embed-resources: true
+    theme: cosmo
+    code-tools: true
+    code-fold: true
+    df-print: paged
+editor: visual
+---
+
+# Reproducibility Study: Initial Analysis
+
+## Introduction
+
+### Motivation
+
+This analysis is a first pass of the data from the early 2024 DIVA Reproducibility Study. The data were wrangled in the script labelled `[100_data_wrangling.html](./100_data_wrangling.html)`.
+
+## Analysis
+
+### Setup
+
+#### Libraries
+
+Getting R libraries.
+
+```{r libraries}
+# R code
+
+# Getting essential libraries
+library("tidyverse")
+library("janitor")
+library("here")
+library("ggokabeito")
+library("zoo")
+library("nlme")
+```
+
+#### Variables
+
+```{r variables}
+# R code
+
+# Setting seed and selecting Okabe-Ito color order
+set.seed(20240510)
+okabe_order = c(5,6,1,2,8,7,4,3,9)
+```
+
+#### Functions
+
+Getting a function to find UTC offset.
+
+```{r find_utc_offset}
+# R code
+
+get_utc_offset <- function(ts, ts_utc = NULL, as_numeric = FALSE) {
+  # Throwing an error if timestamp is not a POSIXct
+  stopifnot(inherits(ts, "POSIXct"))
+
+  if (!is.null(ts_utc)) {
+    stopifnot(inherits(ts_utc, "POSIXct"))
+  } else {
+    ts_utc <- ts
+    attributes(ts_utc)$tzone <- "UTC"
+  }
+
+  # Forcing the initial time zone to a new time zone
+  char_ts <- format(ts, "%Y-%m-%d %H:%M:%S")
+  force_utc_ts <- as.POSIXct(char_ts, tz = "UTC")
+  diff_secs <- as.double(force_utc_ts) - as.double(ts_utc)
+
+  # Finding UTC time and using it to produce offset
+  offset_hr <- abs(diff_secs) %/% 3600 * sign(diff_secs)
+  offset_mn <- abs(diff_secs) %% 3600 %/% 60 * sign(diff_secs)
+
+  # Getting character or numeric output
+  if (as_numeric) {
+    offset <- offset_hr + offset_mn / 60
+  } else {
+    offset <- paste0(
+      formatC(offset_hr, width = 3, flag = "0+"), ":",
+      formatC(abs(offset_mn), width = 2, flag = "0")
+    )
+  }
+  # Returning a properly formatted UTC offset as a character vector
+  return(offset)
+}
+```
+
+### Loading Data
+
+#### Loading `.RDS` Files
+
+Loading the `.RDS` files created in the data wrangling script.
+
+```{r load_rds}
+# R code
+
+repro_wrangling_day = "2024-05-13"
+repro_activity_1hr_df_old = readRDS(paste0("./data/rds/repro_activity_1hr_cage_",
+                                           repro_wrangling_day,".RDS")) |>
+  dplyr::mutate(study_name = study_code) |>
+  dplyr::select(start_date_local, start_time_local, study_name, cage_name, animals_cage_quantity, light_cycle)
+repro_activity_1hr_df = readRDS("./data/reproducibility_cage_data.RDS")
+repro_individual_1hr_df = readRDS("./data/reproducibility_individual_data.RDS")
+
+repro_metadata = readRDS(paste0("./data/rds/repro_metadata_",
+                                repro_wrangling_day,".RDS"))
+repro_annotation_df = readRDS(paste0("./data/rds/repro_annotation_",
+                                     repro_wrangling_day,".RDS"))
+```
+
+#### Finding local times and computing light/dark
+
+Looking at the local times and filling in light/dark information.
+
+```{r local_times_lightdark}
+# R code
+
+# Getting local hour, minute, and second
+repro_activity_1hr_df = as.data.frame(repro_activity_1hr_df)
+repro_activity_1hr_df$utc_offset = NA
+repro_activity_1hr_df$start_date_local = ""
+repro_activity_1hr_df$start_time_local = ""
+for (i in seq_len(nrow(repro_activity_1hr_df))) {
+  tz_i = repro_activity_1hr_df[i,"time_zone"]
+  time_i = repro_activity_1hr_df[i,"time"]
+  time_local_i = lubridate::with_tz(time_i, tz_i)
+  repro_activity_1hr_df[i,"utc_offset"] = get_utc_offset(time_local_i,
+                                                         time_i, 
+                                                         as_numeric = TRUE)
+  repro_activity_1hr_df[i,"start_date_local"] = strftime(time_local_i, tz = tz_i, format = "%Y-%m-%d")
+  repro_activity_1hr_df[i,"start_time_local"] = strftime(time_local_i, tz = tz_i, format = "%H:%M:%S")
+}
+
+repro_activity_1hr_df = repro_activity_1hr_df |>
+  mutate(start_dttm_local = paste(start_date_local, start_time_local),
+         local_hour = as.numeric(gsub("^(\\d{2}):(\\d{2}):(\\d{2})$","\\1",start_time_local)),
+         local_minute = as.numeric(gsub("^(\\d{2}):(\\d{2}):(\\d{2})$","\\2",start_time_local)),
+         local_second = as.numeric(gsub("^(\\d{2}):(\\d{2}):(\\d{2})$","\\3",start_time_local))) |>
+  dplyr::left_join(repro_activity_1hr_df_old, by = c("study_name","start_date_local", "start_time_local", "cage_name"))
+```
+
+Doing the same for individual data.
+
+```{r local_times_lightdark_individual}
+# R code
+
+# Getting local hour, minute, and second
+repro_individual_1hr_df = as.data.frame(repro_individual_1hr_df)
+repro_individual_1hr_df$utc_offset = NA
+repro_individual_1hr_df$start_date_local = ""
+repro_individual_1hr_df$start_time_local = ""
+for (i in seq_len(nrow(repro_individual_1hr_df))) {
+  tz_i = repro_individual_1hr_df[i,"time_zone"]
+  time_i = repro_individual_1hr_df[i,"time"]
+  time_local_i = lubridate::with_tz(time_i, tz_i)
+  repro_individual_1hr_df[i,"utc_offset"] = get_utc_offset(time_local_i,
+                                                         time_i, 
+                                                         as_numeric = TRUE)
+  repro_individual_1hr_df[i,"start_date_local"] = strftime(time_local_i, tz = tz_i, format = "%Y-%m-%d")
+  repro_individual_1hr_df[i,"start_time_local"] = strftime(time_local_i, tz = tz_i, format = "%H:%M:%S")
+}
+
+repro_individual_1hr_df = repro_individual_1hr_df |>
+  mutate(start_dttm_local = paste(start_date_local, start_time_local),
+         local_hour = as.numeric(gsub("^(\\d{2}):(\\d{2}):(\\d{2})$","\\1",start_time_local)),
+         local_minute = as.numeric(gsub("^(\\d{2}):(\\d{2}):(\\d{2})$","\\2",start_time_local)),
+         local_second = as.numeric(gsub("^(\\d{2}):(\\d{2}):(\\d{2})$","\\3",start_time_local))) |>
+  dplyr::left_join(repro_activity_1hr_df_old, by = c("study_name","start_date_local", "start_time_local", "cage_name")) |>
+  dplyr::filter(!(cage_name %in% c("A5","B5","C5") & site == "BioMarin" & replicate == "Replicate 3" & time < ymd_hms("2024-03-05 16:00:00", tz = "America/Los_Angeles")))
+```
+
+Aligning the different replicates and sites. Assuming that cages were placed in DAX units during lights-on and aligning on the initial lights-off.
+
+```{r alignment_different_sites_replicates}
+# R code
+
+# Getting lights-on and -off times
+lights_on_time = as.numeric(gsub("^(\\d{2}):\\d{2}$","\\1",
+                                 repro_metadata$lights_on))
+lights_off_time = as.numeric(gsub("^(\\d{2}):\\d{2}$","\\1",
+                                  repro_metadata$lights_off))
+
+repro_activity_1hr_df = repro_activity_1hr_df |>
+  group_by(site, replicate, cage_name, sex, strain) |>
+  arrange(time) |>
+  mutate(replicate = paste0("Replicate ", replicate),
+         lights_on = local_hour == lights_on_time,
+         lights_off = local_hour == lights_off_time,
+         first_lights_off = min(time[which(local_hour == lights_off_time)]),
+         experiment_time_h = as.numeric(time - first_lights_off) / 3600) |>
+  ungroup() 
+
+repro_individual_1hr_df = repro_individual_1hr_df |>
+  group_by(site, replicate, cage_name, sex, strain) |>
+  arrange(time) |>
+  mutate(replicate = paste0("Replicate ", replicate),
+         lights_on = local_hour == lights_on_time,
+         lights_off = local_hour == lights_off_time,
+         first_lights_off = min(time[which(local_hour == lights_off_time)]),
+         experiment_time_h = as.numeric(time - first_lights_off) / 3600) |>
+  ungroup() 
+
+
+repro_activity_1hr_rollmean_df = repro_activity_1hr_df |>
+  mutate(site_rep_mouse_sex_cagename = paste(site, replicate, strain, sex, cage_name, sep = "_")) |>
+  as.data.frame()
+
+lights_on_off_etimes = repro_activity_1hr_rollmean_df |>
+  filter(lights_on | lights_off) 
+```
+
+There's a set of 3 cages from BioMarin that weren't placed into a recording DAX2 slot until about halfway through the third replicate of the study. These cages are:
+
+* R3 cage C5: male J:ARC mouse placed in cage at 2024-03-05 15:24:48 PST
+* R3 cage B5: male C57BL/6J mouse placed in cage at 2024-03-05 15:24:46 PST
+* R3 cage A5: female A/J mouse placed in cage at 2024-03-05 15:24:58 PST
+
+Filtering these timepoints out and computing rolling means using TSD on occupancy-normalized activity.
+
+```{r rollmean_filtered}
+
+# repro_activity_1hr_rollmean_df = repro_activity_1hr_rollmean_df |>
+#   filter(!(cage_name %in% c("A5","B5","C5") & site == "BioMarin" & replicate == "Replicate 3" & time < ymd_hms("2024-03-05 16:00:00", tz = "America/Los_Angeles"))) |>
+#   group_by(site, replicate, cage_name, sex, strain, study_name) |>
+#   mutate(activity_norm = value / animals_cage_quantity,
+#          activity_norm_approx = na.approx(activity_norm, na.rm = FALSE, maxgap = 4),
+#          activity_rollmean = rollmean(activity_norm_approx, 24, na.pad = TRUE),
+#          activity_circadian = -10000,
+#          activity_trend = -10000,
+#          activity_resid = -10000,
+#          activity_detrended = -10000)
+
+repro_activity_1hr_rollmean_df = repro_activity_1hr_rollmean_df |>
+  filter(!(cage_name %in% c("A5","B5","C5") & site == "BioMarin" & replicate == "Replicate 3" & time < ymd_hms("2024-03-05 16:00:00", tz = "America/Los_Angeles"))) 
+
+rollmean_cages = repro_activity_1hr_rollmean_df |>
+  ungroup() |>
+  group_by(site, replicate, cage_name, sex, strain, study_name) |>
+  summarize(n = length(which(!is.na(value)))) |>
+  as.data.frame()
+
+for (i in seq_len(nrow(rollmean_cages))) {
+  site_i = rollmean_cages[i,"site"]
+  replicate_i = rollmean_cages[i,"replicate"]
+  cage_name_i = rollmean_cages[i,"cage_name"]
+  sex_i = rollmean_cages[i,"sex"]
+  strain_i = rollmean_cages[i,"strain"]
+  cage_df_i = repro_activity_1hr_rollmean_df |>
+    ungroup() |>
+    filter(site == site_i & replicate == replicate_i & cage_name == cage_name_i &
+             sex == sex_i & strain == strain_i) |>
+    mutate(activity_norm = value / animals_cage_quantity,
+           keep = !is.na(activity_norm) | (cumsum(!is.na(activity_norm)) > 0 & rev(cumsum(rev(!is.na(activity_norm))))) > 0) |>
+    dplyr::filter(keep) |>
+    as.data.frame()
+  dates_i = unique(cage_df_i$start_date_local)
+  dates_i = dates_i[order(dates_i)]
+  times_i = unique(cage_df_i$local_hour)
+  times_i = times_i[order(times_i)]
+  ts_mat_i = matrix(nrow = length(dates_i),
+                    ncol = length(times_i))
+  row.names(ts_mat_i) = as.character(dates_i)
+  colnames(ts_mat_i) = paste0("h",times_i)
+  for (j in seq_len(nrow(cage_df_i))) {
+    date_ij = as.character(cage_df_i[j,"start_date_local"])
+    time_ij = paste0("h",cage_df_i[j,"local_hour"])
+    ts_mat_i[date_ij,time_ij] = cage_df_i[j,"activity_norm"]
+  }
+  ts_i = ts(c(t(ts_mat_i)), frequency = 24)
+  ts_nona_i = zoo::na.approx(ts_i, na.rm = FALSE)
+  tsd_i = decompose(ts_nona_i)
+  
+  ts_x_i = matrix(tsd_i$x, byrow = TRUE, ncol = 24)
+  row.names(ts_x_i) = row.names(ts_mat_i)
+  colnames(ts_x_i) = colnames(ts_mat_i)
+  
+  ts_df_i = ts_x_i |>
+    as.data.frame() |>
+    rownames_to_column(var = "start_date_local") |>
+    pivot_longer(cols = -start_date_local, 
+                 names_to = "local_hour",
+                 values_to = "tsd_raw") |>
+    dplyr::mutate(start_date_local = lubridate::ymd(start_date_local),
+                  local_hour = as.numeric(gsub("^h","",local_hour)))
+  
+  ts_seasonal_i = matrix(tsd_i$seasonal, byrow = TRUE, ncol = 24)
+  row.names(ts_seasonal_i) = row.names(ts_mat_i)
+  colnames(ts_seasonal_i) = colnames(ts_mat_i)
+  ts_seasonal_df_i = ts_seasonal_i |>
+    as.data.frame() |>
+    rownames_to_column(var = "start_date_local") |>
+    pivot_longer(cols = -start_date_local, 
+                 names_to = "local_hour",
+                 values_to = "tsd_seasonal") |>
+    dplyr::mutate(start_date_local = lubridate::ymd(start_date_local),
+                  local_hour = as.numeric(gsub("^h","",local_hour)))
+  
+  ts_trend_i = matrix(tsd_i$trend, byrow = TRUE, ncol = 24)
+  row.names(ts_trend_i) = row.names(ts_mat_i)
+  colnames(ts_trend_i) = colnames(ts_mat_i)
+  ts_trend_df_i = ts_trend_i |>
+    as.data.frame() |>
+    rownames_to_column(var = "start_date_local") |>
+    pivot_longer(cols = -start_date_local, 
+                 names_to = "local_hour",
+                 values_to = "tsd_trend") |>
+    dplyr::mutate(start_date_local = lubridate::ymd(start_date_local),
+                  local_hour = as.numeric(gsub("^h","",local_hour)))
+  
+  ts_residual_i = matrix(tsd_i$random, byrow = TRUE, ncol = 24)
+  row.names(ts_residual_i) = row.names(ts_mat_i)
+  colnames(ts_residual_i) = colnames(ts_mat_i)
+  ts_residual_df_i = ts_residual_i |>
+    as.data.frame() |>
+    rownames_to_column(var = "start_date_local") |>
+    pivot_longer(cols = -start_date_local, 
+                 names_to = "local_hour",
+                 values_to = "tsd_residual") |>
+    dplyr::mutate(start_date_local = lubridate::ymd(start_date_local),
+                  local_hour = as.numeric(gsub("^h","",local_hour)))
+  
+  site_i = rollmean_cages[i,"site"]
+  replicate_i = rollmean_cages[i,"replicate"]
+  cage_name_i = rollmean_cages[i,"cage_name"]
+  sex_i = rollmean_cages[i,"sex"]
+  strain_i = rollmean_cages[i,"strain"]
+  
+  tsd_df_i = ts_df_i[,1:2] |>
+    mutate(site = site_i, replicate = replicate_i, cage_name = cage_name_i,
+           sex = sex_i, strain = strain_i) |>
+    left_join(ts_df_i, by = c("start_date_local", "local_hour")) |>
+    left_join(ts_seasonal_df_i, by = c("start_date_local", "local_hour")) |>
+    left_join(ts_trend_df_i, by = c("start_date_local", "local_hour")) |>
+    left_join(ts_residual_df_i, by = c("start_date_local", "local_hour")) |>
+    mutate(start_date_local = as.character(start_date_local))
+  
+  if (i == 1) {
+    tsd_df = tsd_df_i
+  } else {
+    tsd_df = rbind(tsd_df, tsd_df_i)
+  }
+}
+
+repro_activity_1hr_rollmean_df = repro_activity_1hr_rollmean_df |>
+  dplyr::left_join(tsd_df, by = c("site", "replicate", "cage_name", "sex", 
+                                  "strain", "start_date_local",  "local_hour")) |>
+  dplyr::mutate(tsd_detrended = tsd_raw - tsd_seasonal)
+```
+
+#### Computing total hours of video and animal-hours.
+
+```{r video_hours}
+# R code
+
+hours_df = repro_activity_1hr_df |> 
+  ungroup() |> 
+  filter(!(cage_name %in% c("A5","B5","C5") & site == "BioMarin" & replicate == "Replicate 3" & time < ymd_hms("2024-03-05 16:00:00", tz = "America/Los_Angeles")))
+
+video_hours = nrow(hours_df)
+animal_hours = sum(pull(hours_df, animals_cage_quantity))
+
+cat("We collected a total of ",
+    prettyNum(video_hours, big.mark = ",", scientific = FALSE),
+    " hours (", round(video_hours / 24 / 365.2425, 2),
+    " years) of video documenting ",
+    prettyNum(animal_hours, big.mark = ",", scientific = FALSE),
+    " hours (", round(animal_hours / 24 / 365.2425, 2),
+    " years) of mouse home cage behavior.", 
+    sep = "")
+```
+
+#### Making spaghetti plot
+
+Plotting aligned data. Adding a vertical dashed line at 2024-02-27, which was when a major model update that included DAX2 training data went live. Starting with the rolling mean plot.
+
+```{r}
+# R code
+feb27 = repro_activity_1hr_rollmean_df |>
+  filter(start_date_local == "2024-02-27" & start_time_local == "06:00:00") |>
+  select(strain, sex, site, replicate, experiment_time_h, cage_name, study_name) |>
+  group_by(strain, sex, replicate) |>
+  summarize(xintercept = min(unique(experiment_time_h)))
+
+ggplot(data = repro_activity_1hr_rollmean_df, aes(x = experiment_time_h,
+                                                  y = tsd_trend,
+                                                  color = site,
+                                                  group = site_rep_mouse_sex_cagename)) +
+  geom_line() +
+  facet_grid(replicate ~ strain + sex) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1), 
+        panel.grid = element_line(color = "#FFFFFF")) +
+  scale_color_okabe_ito(name = "Site", order = okabe_order) +
+  xlab("Experiment Time (hours)") +
+  ylab("24-Hour Rolling Mean of Density-Normalized Activity (cm/s)")
+```
+Finding distance travelled during full days in each cage.
+
+```{r}
+# R code
+
+activity_24h_mean <- repro_activity_1hr_df |> 
+  ungroup() |> 
+  filter(!(cage_name %in% c("A5","B5","C5") & site == "BioMarin" & replicate == "Replicate 3" & time < ymd_hms("2024-03-05 16:00:00", tz = "America/Los_Angeles"))) |>
+  dplyr::mutate(activity_norm = value / animals_cage_quantity,
+                activity_norm_approx = na.approx(activity_norm, na.rm = FALSE, maxgap = 4)) |>
+  dplyr::group_by(start_date_local, cage_id, cage_name, site, replicate, strain, sex) |> 
+  dplyr::summarize(mean_activity = mean(activity_norm_approx, na.rm = TRUE),
+                   n_hours = length(start_time_local)) |> 
+  ungroup() |>
+  dplyr::filter(n_hours == 24) |>
+  dplyr::group_by(cage_id, cage_name, site, replicate, strain, sex) |>
+  dplyr::summarize(meters_day = mean(mean_activity) * 86400 / 100)
+```
+
+Running an ANOVA of the meters/day dataset.
+
+```{r}
+# R code
+
+meters_per_day_aov = as.data.frame(anova(lm(meters_day ~ strain + sex + site + replicate + strain:sex + strain:site + strain:replicate, data = activity_24h_mean))) |>
+  janitor::clean_names()
+meters_per_day_aov$pve = 100 * meters_per_day_aov$sum_sq / sum(meters_per_day_aov$sum_sq)
+meters_per_day_aov$study = "24 Hour Activity"
+meters_per_day_aov$factor = row.names(meters_per_day_aov)
+meters_per_day_aov$factor = gsub(":"," ", meters_per_day_aov$factor)
+meters_per_day_aov$factor = stringr::str_to_title(meters_per_day_aov$factor)
+meters_per_day_aov$factor = gsub(" ", ":", meters_per_day_aov$factor)
+meters_per_day_aov$factor = gsub("Strain", "Genetics", meters_per_day_aov$factor)
+
+factor_order = c("Genetics","Sex","Site","Replicate","Genetics:Sex","Genetics:Site","Genetics:Replicate","Residuals")
+meters_per_day_aov$factor = factor(meters_per_day_aov$factor, levels = factor_order, ordered = TRUE)
+meters_per_day_aov
+```
+
+Computing contribution of different factors.
+
+```{r}
+# R code
+
+genetics = meters_per_day_aov["strain","pve"]
+sex = meters_per_day_aov["sex","pve"]
+technical_factors = meters_per_day_aov["site","pve"] + meters_per_day_aov["replicate","pve"] + meters_per_day_aov["strain:site","pve"] + meters_per_day_aov["strain:replicate","pve"]
+residuals = meters_per_day_aov["Residuals","pve"]
+cat("Genetics accounts for ", round(genetics, 1), "% of the variance in 24-hour activity.\n",
+    "Sex accounts for ", round(sex, 1), "% of the variance in 24-hour activity.\n",
+    "Technical factors (site, replicate, and their interaction with genetics) accounts for ",
+    round(technical_factors, 1), "% of the variance in 24-hour activity.\n",
+    "Residuals (error) accounts for ", round(residuals, 1), "% of the variance in 24-hour activity.", sep = "")
+```
+
+Now plotting these data.
+
+```{r}
+# R code
+meters_day_plot = ggplot(data = activity_24h_mean, 
+                         aes(x = strain, y = meters_day, color = strain)) + 
+  geom_boxplot(na.rm = TRUE) + 
+  ggbeeswarm::geom_beeswarm() + 
+  theme_bw() +
+  theme(legend.position = "none",
+        panel.grid = element_line(color = "#FFFFFF")) +
+  scale_color_okabe_ito(name = "Genetics", order = okabe_order[c(4:9,1:3)]) +
+  xlab("Genetics") +
+  ylab("Average Activity (meters/day)")
+
+okabe_order_factors = c("#56B4E9","#D55E00","#009E73","#999999","#0072B2","#CC79A7","#F0E442","#E69F00")
+
+meters_day_pve_plot = ggplot(data = meters_per_day_aov,
+                             aes(x = pve, y = study, fill = factor)) +
+  geom_bar(stat = "identity", color = "#000000") + 
+  scale_fill_manual(name = NULL, values = okabe_order_factors) +
+  theme_bw() +
+  xlab("Percent Variance Explained") +
+  ylab(NULL) +
+  theme(legend.position = "bottom",
+        panel.grid = element_line(color = "#FFFFFF"))
+
+meters_day_plot
+```
+
+Doing site-specific ANOVAs. Starting with AbbVie.
+
+```{r abbvie_overall_aov}
+# R code
+
+abbvie_meters_per_day_aov = as.data.frame(anova(lm(meters_day ~ strain + sex + replicate + strain:sex + strain:replicate, data = activity_24h_mean |> dplyr::filter(site == "AbbVie")))) |>
+  janitor::clean_names()
+abbvie_meters_per_day_aov
+```
+
+Doing BioMarin
+
+```{r biomarin_overall_aov}
+# R code
+
+biomarin_meters_per_day_aov = as.data.frame(anova(lm(meters_day ~ strain + sex + replicate + strain:sex + strain:replicate, data = activity_24h_mean |> dplyr::filter(site == "BioMarin")))) |>
+  janitor::clean_names()
+biomarin_meters_per_day_aov
+```
+Finally, doing Novartis.
+
+```{r novartis_overall_aov}
+# R code
+
+novartis_meters_per_day_aov = as.data.frame(anova(lm(meters_day ~ strain + sex + replicate + strain:sex + strain:replicate, data = activity_24h_mean |> dplyr::filter(site == "Novartis")))) |>
+  janitor::clean_names()
+novartis_meters_per_day_aov
+```
+
+Now working with light/dark data.
+
+Computing dark time and light time data frames for these datasets.
+
+```{r dark_light_datasets}
+# R code
+
+repro_activity_1hr_lightdark_df = repro_activity_1hr_df |>
+  ungroup() |>
+  dplyr::filter(!(cage_name %in% c("A5","B5","C5") & site == "BioMarin" & replicate == "Replicate 3" & time < ymd_hms("2024-03-05 16:00:00", tz = "America/Los_Angeles"))) |>
+  mutate(activity_norm = value / animals_cage_quantity,
+         start_date_local = ymd(start_date_local),
+         replicate = gsub("^R","Replicate ",replicate)) |>
+  group_by(study_name, cage_name, replicate, site, strain, sex) |>
+  mutate(experiment_date = as.numeric(start_date_local - min(start_date_local))) |>
+  ungroup() |>
+  group_by(study_name, cage_name, replicate, site, strain, sex, start_date_local, experiment_date, light_cycle) |>
+  summarize(mean_activity_norm = mean(activity_norm, na.rm = TRUE)) |>
+  mutate(site_rep_mouse_sex_cagename = paste(site, replicate, strain, sex, cage_name, sep = "_"))
+
+ggplot(data = repro_activity_1hr_lightdark_df, aes(x = experiment_date,
+                                         y = mean_activity_norm,
+                                         color = site,
+                                         group = site_rep_mouse_sex_cagename)) +
+  geom_line() +
+  facet_grid(light_cycle + replicate ~ strain + sex, scales = "free_y") +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  scale_color_okabe_ito(order = okabe_order)
+```
+
+```{r}
+# R code
+
+ggplot(data = repro_activity_1hr_lightdark_df, aes(x = experiment_date,
+                                                   y = mean_activity_norm,
+                                                   color = site,
+                                                   group = site_rep_mouse_sex_cagename)) +
+    geom_line() +
+    facet_grid(light_cycle + replicate ~ strain + sex, scales = "free_y") +
+    theme_bw() +
+    theme(legend.position = "bottom") +
+    scale_color_okabe_ito(order = okabe_order)
+```
+
+Making plots of the hourly activity patterns.
+
+```{r hourly_datasets}
+# R code
+
+repro_activity_1hr_hourly_df = repro_activity_1hr_df |>
+    ungroup() |>
+    filter(!(replicate == "Replicate 3" & time < ymd_hms("2024-03-05 16:00:00", tz = "America/Los_Angeles") & site == "BioMarin")) |>
+    mutate(activity_norm = value / animals_cage_quantity,
+           start_date_local = ymd(start_date_local)) |>
+    group_by(study_name, cage_name, replicate, site, strain, sex) |>
+    mutate(experiment_date = as.numeric(start_date_local - min(start_date_local))) |>
+    ungroup() |>
+    group_by(study_name, cage_name, replicate, site, strain, sex, start_time_local) |>
+    summarize(mean_activity_norm = mean(activity_norm, na.rm = TRUE)) |>
+    mutate(site_rep_mouse_sex_cagename = paste(site, replicate, strain, sex, cage_name, sep = "_"),
+           start_time_local = factor(start_time_local, levels = paste0(formatC(c(4:23,0:3), width = 2, flag = "0"), ":00:00"), ordered = TRUE))
+
+ggplot(data = repro_activity_1hr_hourly_df, aes(x = as.numeric(start_time_local),
+                                                y = mean_activity_norm,
+                                                color = site,
+                                                group = site_rep_mouse_sex_cagename)) +
+    geom_rect(xmin = 15, xmax = 25, ymin = -Inf, ymax = Inf, 
+              alpha = 1, fill = "#DDDDDD", color = NA) +
+    geom_line() +
+    facet_grid(replicate ~ strain + sex, scales = "free_y") +
+    theme_bw() +
+    scale_x_continuous(breaks = seq(from = 1, to = 24, by = 4), labels = c("04:00","08:00","12:00","16:00","20:00","00:00")) +
+    theme(legend.position = "bottom",
+          axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+          panel.grid = element_line(color = "#FFFFFF")) +
+    xlab("Time of Day") +
+    ylab("Mean Activity (cm/s)") +
+    scale_color_okabe_ito(name = "Site", order = okabe_order)
+```
+
+Plotting strain and sex averages of each hour.
+
+```{r strain_sex_averages}
+# R code
+
+repro_activity_1hr_hourly_summary = repro_activity_1hr_hourly_df |>
+  dplyr::group_by(strain, sex, start_time_local) |>
+  dplyr::summarize(mean = mean(mean_activity_norm, na.rm = TRUE),
+                   sd = sd(mean_activity_norm, na.rm = TRUE),
+                   n = length(which(!is.na(mean_activity_norm))),
+                   sem = sd / sqrt(n),
+                   ll = mean - sem,
+                   ul = mean + sem)
+
+ggplot(data = repro_activity_1hr_hourly_summary, aes(x = as.numeric(start_time_local),
+                                                     y = mean,
+                                                     color = strain)) +
+  geom_rect(xmin = 15, xmax = 25, ymin = -Inf, ymax = Inf, 
+            alpha = 1, fill = "#DDDDDD", color = NA) +
+  geom_ribbon(aes(ymin = ll, ymax = ul, fill = strain),
+              alpha = 0.5, color = NA) +
+  geom_line() +
+  facet_wrap(sex ~ ., nrow = 2) +
+  theme_bw() +
+  scale_x_continuous(breaks = seq(from = 1, to = 24, by = 4), labels = c("04:00","08:00","12:00","16:00","20:00","00:00"), expand = c(0,0)) +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+        panel.grid = element_line(color = "#FFFFFF")) +
+  xlab("Time of Day") +
+  ylab("Mean Activity (cm/s)") +
+  scale_color_okabe_ito(name = "Genetics", order = okabe_order[c(4:9,1:3)]) +
+  scale_fill_okabe_ito(name = "Genetics", order = okabe_order[c(4:9,1:3)])
+```
+
+Looking at hour-by-hour percent variation explained. We use the following model:
+
+$\text{mean\_activity\_norm} = \beta_0 + \beta_1 \cdot \text{site} + \beta_2 \cdot \text{replicate} + \beta_3 \cdot \text{strain} + \beta_4 \cdot \text{sex} + \beta_5 \cdot (\text{strain} \times \text{sex}) + \beta_6 \cdot (\text{site} \times \text{strain}) + \beta_7 \cdot (\text{replicate} \times \text{strain}) + \epsilon$
+
+```{r pve}
+# R code
+
+start_times = unique(as.character(repro_activity_1hr_hourly_df$start_time_local))
+for (i in start_times) {
+  df_i = repro_activity_1hr_hourly_df |>
+    filter(as.character(start_time_local) == i)
+  aov_i = as.data.frame(anova(lm(mean_activity_norm ~ site + replicate + strain * sex + site:strain + replicate:strain, data = df_i)))
+  ss_i = aov_i$`Sum Sq`
+  names(ss_i) = row.names(aov_i)
+  pve_i = ss_i * 100 / sum(ss_i) 
+  df_pve_i = data.frame(start_time_local = i,
+                        factor = names(pve_i),
+                        percent_variance_explained = pve_i)
+  if (i == start_times[1]) {
+    df_pve = df_pve_i
+  } else {
+    df_pve = rbind(df_pve,
+                   df_pve_i)
+  }
+}
+
+df_pve$start_time_local = factor(df_pve$start_time_local,
+                                 levels = levels(repro_activity_1hr_hourly_df$start_time_local),
+                                 ordered = TRUE)
+df_pve$factor = str_to_title(df_pve$factor)
+df_pve$factor = gsub("sex", "Sex", df_pve$factor)
+df_pve$factor = gsub("[Ss]train", "Genetics", df_pve$factor)
+df_pve$factor = gsub("[Rr]eplicate", "Replicate", df_pve$factor)
+
+df_pve$factor = factor(df_pve$factor,
+                       levels = c("Residuals","Genetics","Sex",
+                                  "Genetics:Sex","Site","Replicate",
+                                  "Site:Genetics","Replicate:Genetics"))
+
+ggplot(data = df_pve, aes(x = as.numeric(start_time_local), 
+                          y = percent_variance_explained, 
+                          fill = factor)) +
+  geom_bar(position="stack", stat="identity", color = "#444455", width = 1) +
+  scale_x_continuous(breaks = seq(from = 1, to = 24, by = 4), labels = c("04:00","08:00","12:00","16:00","20:00","00:00")) +
+  theme_bw() +
+  scale_fill_okabe_ito(name = "Factor") +
+  xlab("Time of Day") +
+  ylab("Percent Variance Explained") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+        panel.grid = element_line(color = "#FFFFFF"),
+        legend.position = "bottom")
+```
+
+Doing something similar with individual metrics with a mixed model that uses a separate error stratum for cages.
+
+```{r}
+# R code
+
+repro_individual_1hr_df = repro_individual_1hr_df |>
+  mutate(site_rep_mouse_sex_cagename_animal = paste(site, replicate, strain, sex, cage_name, animal_id, sep = "_"),
+         start_time_local = factor(start_time_local, levels = paste0(formatC(c(4:23,0:3), width = 2, flag = "0"), ":00:00"), ordered = TRUE))
+
+for (i in start_times) {
+  repro_individual_1hr_df_i = repro_individual_1hr_df |>
+    dplyr::filter(as.character(start_time_local) == i) |>
+    dplyr::mutate(animal_id = paste0("animal_", animal_id)) |>
+    dplyr::group_by(study_id, study_name, site, replicate, cage_id, cage_name,
+                    strain, sex, animal_id) |>
+    dplyr::summarize(mean_activity = mean(value, na.rm = TRUE)) |>
+    dplyr::ungroup()
+  
+  repro_1hr_cageavg_df_i = repro_individual_1hr_df |>
+    dplyr::filter(as.character(start_time_local) == i) |>
+    dplyr::mutate(animal_id = paste0("animal_", animal_id)) |>
+    dplyr::group_by(study_id, study_name, site, replicate, cage_id, cage_name,
+                    strain, sex, start_date_local) |>
+    dplyr::summarize(mean_activity = mean(value, na.rm = TRUE)) |>
+    dplyr::ungroup() |>
+    dplyr::group_by(study_id, study_name, site, replicate, cage_id, cage_name,
+                    strain, sex) |>
+    dplyr::summarize(mean_activity = mean(mean_activity, na.rm = TRUE)) |>
+    dplyr::ungroup()
+  
+  cage_lm_i = lm(mean_activity ~ site + replicate + strain * sex + site:strain + replicate:strain, 
+                 data = repro_1hr_cageavg_df_i)
+  individual_lme_i = lme(mean_activity ~ site + replicate + strain * sex + site:strain + replicate:strain, 
+                       random = ~ 1 | cage_id, 
+                       data = repro_individual_1hr_df_i)
+  individual_lm_i = lm(mean_activity ~ site + replicate + strain * sex + site:strain + replicate:strain, 
+                     data = repro_individual_1hr_df_i)
+  individual_cage_anova_i = anova(individual_lme_i, individual_lm_i)
+  if (i == start_times[1]) {
+    individual_lme_df = as.data.frame(anova(individual_lme_i)) |>
+      tibble::rownames_to_column(var = "factor") |>
+      dplyr::mutate(start_time_local = i)
+    individual_cage_anova_df = as.data.frame(individual_cage_anova_i) |>
+      dplyr::mutate(start_time_local = i)
+    cage_anova_df = as.data.frame(anova(cage_lm_i)) |>
+      tibble::rownames_to_column(var = "factor") |>
+      dplyr::mutate(start_time_local = i)
+  } else {
+        individual_lme_df = rbind(individual_lme_df, 
+                                  as.data.frame(anova(individual_lme_i)) |>
+                                    tibble::rownames_to_column(var = "factor") |>
+                                    dplyr::mutate(start_time_local = i))
+        individual_cage_anova_df = rbind(individual_cage_anova_df,
+                                         as.data.frame(individual_cage_anova_i) |>
+                                           dplyr::mutate(start_time_local = i))
+        cage_anova_df = rbind(cage_anova_df,
+                              as.data.frame(anova(cage_lm_i)) |>
+                                tibble::rownames_to_column(var = "factor") |>
+                                dplyr::mutate(start_time_local = i))
+  }
+}
+
+cage_anova_df = cage_anova_df |>
+  janitor::clean_names() |>
+  dplyr::group_by(start_time_local) |>
+  dplyr::mutate(pve = 100 * sum_sq / sum(sum_sq),
+                start_time_local = factor(start_time_local,
+                                          levels = levels(repro_individual_1hr_df$start_time_local),
+                                          ordered = TRUE)) |>
+  as.data.frame()
+
+cage_anova_df$factor = str_to_title(cage_anova_df$factor)
+cage_anova_df$factor = gsub("sex", "Sex", cage_anova_df$factor)
+cage_anova_df$factor = gsub("[Ss]train", "Genetics", cage_anova_df$factor)
+cage_anova_df$factor = gsub("[Rr]eplicate", "Replicate", cage_anova_df$factor)
+
+cage_anova_df$factor = factor(cage_anova_df$factor,
+                              levels = c("Residuals","Genetics","Sex",
+                                         "Genetics:Sex","Site","Replicate",
+                                         "Site:Genetics","Replicate:Genetics"),
+                              ordered = TRUE)
+
+individual_cage_bic_diff_df = individual_cage_anova_df |>
+  dplyr::group_by(start_time_local) |>
+  dplyr::summarize(aic_diff = AIC[which(Model == 2)] - AIC[which(Model == 1)],
+                   bic_diff = BIC[which(Model == 2)] - BIC[which(Model == 1)],
+                   LikRat = L.Ratio[which(Model == 2)],
+                   pvalue = `p-value`[which(Model == 2)])
+
+ggplot(data = cage_anova_df, aes(x = as.numeric(start_time_local), 
+                                 y = pve, 
+                                 fill = factor)) +
+  geom_bar(position="stack", stat="identity", color = "#444455", width = 1) +
+  scale_x_continuous(breaks = seq(from = 1, to = 24, by = 4), labels = c("04:00","08:00","12:00","16:00","20:00","00:00")) +
+  theme_bw() +
+  scale_fill_okabe_ito(name = "Factor") +
+  xlab("Time of Day") +
+  ylab("Percent Variance Explained") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+        panel.grid = element_line(color = "#FFFFFF"),
+        legend.position = "bottom")
+```
+
+Now trying the same with downsampling.
+
+```{r downsample_replicates}
+# R code
+
+options(dplyr.summarise.inform = FALSE)
+
+sample_size = 1:21
+local_hour = unique(repro_activity_1hr_df$local_hour)
+n_sims = 100
+
+for (i in local_hour) {
+  for (j in sample_size) {
+    for (k in seq_len(n_sims)) {
+      df_ijk = repro_activity_1hr_df |>
+        dplyr::filter(!(replicate == "Replicate 3" & time < ymd_hms("2024-03-05 16:00:00", tz = "America/Los_Angeles") & site == "BioMarin")) |>
+        dplyr::filter(local_hour == i) |>
+        dplyr::ungroup() |>
+        dplyr::group_by(study_name, cage_name, site, replicate, strain, sex) |>
+        dplyr::mutate(n = length(value),
+                      random = sample(seq_len(unique(n)))) |>
+        dplyr::filter(random <= j) |>
+        dplyr::summarize(mean_activity_norm = mean(value / animals_cage_quantity, na.rm = TRUE))
+      aov_ijk = as.data.frame(anova(lm(mean_activity_norm ~ site + replicate + strain * sex + site:strain + replicate:strain, data = df_ijk))) |>
+        janitor::clean_names() |>
+        tibble::rownames_to_column(var = "factor") |>
+        dplyr::mutate(start_time_local = i,
+                      sample_size = j,
+                      replicate = k,
+                      anova = "Overall",
+                      percent_variance_explained = 100 * sum_sq / sum(sum_sq))
+      aov_bm_ijk = as.data.frame(anova(lm(mean_activity_norm ~ replicate + strain * sex + replicate:strain, data = df_ijk |> filter(site == "BioMarin")))) |>
+        janitor::clean_names() |>
+        tibble::rownames_to_column(var = "factor") |>
+        dplyr::mutate(start_time_local = i,
+                      sample_size = j,
+                      replicate = k,
+                      anova = "BioMarin",
+                      percent_variance_explained = 100 * sum_sq / sum(sum_sq))
+      aov_av_ijk = as.data.frame(anova(lm(mean_activity_norm ~ replicate + strain * sex + replicate:strain, data = df_ijk |> filter(site == "AbbVie")))) |>
+        janitor::clean_names() |>
+        tibble::rownames_to_column(var = "factor") |>
+        dplyr::mutate(start_time_local = i,
+                      sample_size = j,
+                      replicate = k,
+                      anova = "AbbVie",
+                      percent_variance_explained = 100 * sum_sq / sum(sum_sq))
+      aov_nv_ijk = as.data.frame(anova(lm(mean_activity_norm ~ replicate + strain * sex + replicate:strain, data = df_ijk |> filter(site == "Novartis")))) |>
+        janitor::clean_names() |>
+        tibble::rownames_to_column(var = "factor") |>
+        dplyr::mutate(start_time_local = i,
+                      sample_size = j,
+                      replicate = k,
+                      anova = "Novartis",
+                      percent_variance_explained = 100 * sum_sq / sum(sum_sq))
+      df_pve_ijk = rbind(aov_ijk, aov_av_ijk, aov_bm_ijk, aov_nv_ijk)
+      if (i == local_hour[1] & j == sample_size[1] & k == 1) {
+        df_pve_rand = df_pve_ijk
+      } else {
+        df_pve_rand = rbind(df_pve_rand, df_pve_ijk)
+      }
+    }
+  }
+}
+saveRDS(df_pve_rand, "./data/df_pve_rand.RDS")
+```
+
+Getting median values and rescaling for this dataset.
+
+```{r reproducibility_by_n_days}
+# R code
+df_pve_rand_summary = df_pve_rand |>
+  dplyr::filter(anova == "Overall") |>
+  group_by(sample_size, start_time_local, factor) |>
+  summarize(median_ss = median(sum_sq),
+            median_ms = median(mean_sq),
+            median_f = median(f_value),
+            median_p = median(pr_f),
+            median_pve = median(percent_variance_explained)) |>
+  ungroup() |>
+  group_by(sample_size, start_time_local) |>
+  mutate(rescaled_median_pve = 100 * median_pve / sum(median_pve)) |>
+  ungroup() |>
+  mutate(start_time_local = factor(paste0(formatC(start_time_local, width = 2, flag = 0),":00:00"),
+                                   levels = paste0(formatC(c(4:23,0:3), 
+                                                           width = 2,
+                                                           flag = "0"), 
+                                                   ":00:00"), 
+                                   ordered = TRUE))
+
+df_pve_rand_summary |>
+  dplyr::filter(sample_size %in% c(1,3,10,20)) |>
+  dplyr::mutate(sample_size = paste(sample_size, "Days"),
+                sample_size = gsub("^1 Days$", "1 Day", sample_size),
+                sample_size = factor(paste("Sample Size:", sample_size),
+                                     levels = paste("Sample Size:", c(1,3,10,20), 
+                                                    c("Day","Days","Days","Days")),
+                                     ordered = TRUE),
+                factor = str_to_title(factor),
+                factor = gsub("sex", "Sex", factor),
+                factor = gsub("[Ss]train", "Genetics", factor),
+                factor = factor(factor,
+                                levels = c("Residuals","Genetics","Sex",
+                                           "Genetics:Sex","Site","Replicate",
+                                           "Site:Genetics","Replicate:Genetics"),
+                                ordered = TRUE)) |>
+  ggplot(aes(x = as.numeric(start_time_local), 
+                          y = rescaled_median_pve, 
+                          fill = factor)) +
+  geom_bar(position="stack", stat="identity", color = "#444455", width = 1) +
+  scale_x_continuous(breaks = seq(from = 1, to = 24, by = 4), labels = c("04:00","08:00","12:00","16:00","20:00","00:00"), expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  facet_wrap(. ~ sample_size, ncol = 2) +
+  theme_bw() +
+  scale_fill_okabe_ito(name = "Factor") +
+  xlab("Time of Day") +
+  ylab("Median Percent Variance Explained (Rescaled)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+        panel.grid = element_line(color = "#FFFFFF"),
+        legend.position = "bottom")
+```
+
+Now looking specifically at reproducibility of the strain finding.
+
+```{r reproducibility_strain}
+# R code
+
+df_pve_strain_reprod_summary = df_pve_rand |>
+  dplyr::filter(anova != "Overall" & factor == "strain" & sample_size <= 20) |>
+  dplyr::group_by(replicate, sample_size, start_time_local) |>
+  dplyr::summarize(n_sig = length(which(pr_f < 0.05))) |>
+  dplyr::ungroup() |>
+  dplyr::group_by(sample_size, n_sig) |>
+  dplyr::summarize(n = length(replicate)) |>
+  dplyr::ungroup() |> 
+  dplyr::group_by(sample_size) |>
+  dplyr::mutate(percent = 100 * n / sum(n))
+
+df_pve_strain_reprod_summary |>
+  dplyr::mutate(n_sig = paste(n_sig, "significant")) |>
+  ggplot(aes(x = sample_size, y = percent, fill = n_sig)) +
+  geom_bar(position="stack", stat="identity", color = "#444455", width = 1) +
+  theme_bw() +
+  scale_x_continuous(breaks = 1:20, expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_fill_manual(name = "Number of Significant Tests", values = c("#FFFFFF","#BBBBBB","#777777","#222222")) +
+  theme(legend.position = "bottom",
+        panel.grid = element_line(color = "#FFFFFF")) +
+  ylab("Percent Tests that Reproduce Between Sites") +
+  xlab("Number of Days in Phenotype")
+```
+
+Looking at 20 days for reproducibility.
+
+```{r repro_20days}
+# R code
+
+df_pve_strain_reprod_20days = df_pve_rand |>
+  dplyr::filter(anova != "Overall" & factor == "strain" & sample_size == 20) |>
+  dplyr::group_by(replicate, sample_size, start_time_local) |>
+  dplyr::summarize(n_sig = length(which(pr_f < 0.05))) |>
+  dplyr::ungroup() |>
+  dplyr::group_by(sample_size, n_sig, start_time_local) |>
+  dplyr::summarize(n = length(replicate)) |>
+  dplyr::ungroup() |> 
+  dplyr::group_by(sample_size, start_time_local) |>
+  dplyr::mutate(percent = 100 * n / sum(n),
+                start_time_local = paste0(formatC(start_time_local, width = 2, flag = 0),":00:00")) |>
+  dplyr::ungroup() |>
+  dplyr::mutate(start_time_local = factor(start_time_local,
+                                          levels = paste0(formatC(c(4:23,0:3), 
+                                                           width = 2,
+                                                           flag = "0"), 
+                                                   ":00:00"),
+                                          ordered = TRUE))
+
+df_pve_strain_reprod_20days |>
+  dplyr::mutate(n_sig = paste(n_sig, "significant")) |>
+  ggplot(aes(x = as.numeric(start_time_local), y = percent, fill = n_sig)) +
+  geom_bar(position="stack", stat="identity", color = "#444455", width = 1) +
+  theme_bw() +
+  scale_x_continuous(breaks = seq(from = 1, to = 24, by = 4), labels = c("04:00","08:00","12:00","16:00","20:00","00:00"), expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_fill_manual(name = "Number of Significant Tests", values = c("#FFFFFF","#BBBBBB","#777777","#222222")) +
+  theme(legend.position = "bottom",
+        panel.grid = element_line(color = "#FFFFFF")) +
+  ylab("Percent Tests that Reproduce Between Sites") +
+  xlab("Time of Day")
+```
+
+Saving everything.
+
+```{r save_everything}
+# R code
+
+save(list = ls(), file = "./reproducibility_3site_analysis_data.RData")
+```
+
+## Reproducibility Information
+
+Reporting out R session information.
+
+```{r r_sessioninfo}
+# R code
+
+sessionInfo()
+```
